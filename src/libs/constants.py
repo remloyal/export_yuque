@@ -74,6 +74,9 @@ class MutualAnswer:
     toc_range: List[str]
     skip: bool
     line_break: bool
+    export_md: bool = True
+    export_html: bool = False
+    export_concurrency: int = 1
     download_range: str = "all"  
     selected_docs: Dict[str, List[str]] = field(default_factory=dict) 
     progress_callback: Optional[callable] = None

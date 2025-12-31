@@ -111,6 +111,12 @@ class Request:
             # 为HTML请求设置更适合的头部
             headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
             headers["Accept-Language"] = "zh-CN,zh;q=0.9,en;q=0.8"
+            # 使用桌面UA，避免返回移动端页面结构导致无法提取正文
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
             # 避免Ajax方式返回
             if "x-requested-with" in headers:
                 del headers["x-requested-with"]

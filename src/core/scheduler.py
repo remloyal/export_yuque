@@ -192,28 +192,49 @@ class Scheduler:
             else:
                 Log.info("下载范围: 所有文档")
 
-            # 下载每个文档
-            for i, doc in enumerate(filtered_docs, 1):
-                try:
+            export_md = getattr(answer, 'export_md', True)
+            export_html = getattr(answer, 'export_html', False)
+            export_concurrency = max(1, int(getattr(answer, 'export_concurrency', 1) or 1))
+            playwright_concurrency = max(1, export_concurrency // 5)
+
+            async def _should_skip(target_dir: str, filename: str) -> bool:
+                if not answer.skip:
+                    return False
+                file_path = os.path.join(target_dir, filename)
+                if os.path.exists(file_path):
+                    answer.skipped_count += 1
+                    Log.info(f"跳过已存在的文件: {filename}")
+                    return True
+                folder_name = os.path.splitext(filename)[0]
+                subdir_file_path = os.path.join(target_dir, folder_name, filename)
+                if os.path.exists(subdir_file_path):
+                    answer.skipped_count += 1
+                    Log.info(f"跳过已存在的文件（在子目录中）: {folder_name}/{filename}")
+                    return True
+                return False
+
+            # HTML导出采用并发抓取（更快）；MD导出维持顺序（避免破坏现有节流/日志顺序）
+            if export_html and not export_md and export_concurrency > 1:
+                semaphore = asyncio.Semaphore(export_concurrency)
+                counter_lock = asyncio.Lock()
+                tasks = []
+
+                for i, doc in enumerate(filtered_docs, 1):
                     doc_title = doc.get('title', 'Untitled')
                     doc_slug = doc.get('slug', '')
                     doc_url = doc.get('url', '')
 
-                    # 调试：记录URL和slug信息
                     Log.debug(f"文档: {doc_title}, URL: {doc_url}, Slug: {doc_slug}")
 
-                    # 检查是否有有效的标识符 (url或slug)
                     if not doc_slug and not doc_url:
                         Log.info(f"跳过没有有效标识符的条目: {doc_title}")
                         continue
 
-                    # 只跳过明确标记为非文档的条目
                     doc_type = doc.get('type', '')
                     if doc_type and doc_type.upper() != 'DOC' and doc_type.lower() != 'document':
                         Log.info(f"跳过非文档条目: {doc_title} (类型: {doc_type})")
                         continue
 
-                    # 根据层级结构构建目录路径
                     target_dir = book_dir
                     parent_uuid = doc.get('parent_uuid', '')
                     if parent_uuid and parent_uuid in level_map:
@@ -221,44 +242,85 @@ class Scheduler:
                         if path_parts:
                             target_dir = os.path.join(book_dir, *path_parts)
 
-                    # 生成文件名
-                    filename = format_filename(doc_title) + '.md'
-                    file_path = os.path.join(target_dir, filename)
+                    filename = format_filename(doc_title) + '.html'
+                    if await _should_skip(target_dir, filename):
+                        continue
 
-                    # 智能跳过已存在的文件
-                    if answer.skip:
-                        # 检查原始文件路径
-                        if os.path.exists(file_path):
-                            answer.skipped_count += 1
-                            Log.info(f"跳过已存在的文件: {filename}")
+                    async def _run_one(d=doc, idx=i, title=doc_title):
+                        async with semaphore:
+                            try:
+                                if answer.progress_callback:
+                                    answer.progress_callback(f"正在下载文章 ({idx}/{len(filtered_docs)}): {title}")
+                                await Scheduler._download_doc(namespace, d, book_dir, answer, level_map)
+                                async with counter_lock:
+                                    answer.downloaded_count += 1
+                            except Exception as e:
+                                Log.error(f"下载文档失败: {str(e)}")
+                            finally:
+                                await asyncio.sleep(GLOBAL_CONFIG.duration / 1000)
+
+                    tasks.append(_run_one())
+
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            else:
+                # 下载每个文档（顺序）
+                for i, doc in enumerate(filtered_docs, 1):
+                    try:
+                        doc_title = doc.get('title', 'Untitled')
+                        doc_slug = doc.get('slug', '')
+                        doc_url = doc.get('url', '')
+
+                        # 调试：记录URL和slug信息
+                        Log.debug(f"文档: {doc_title}, URL: {doc_url}, Slug: {doc_slug}")
+
+                        # 检查是否有有效的标识符 (url或slug)
+                        if not doc_slug and not doc_url:
+                            Log.info(f"跳过没有有效标识符的条目: {doc_title}")
                             continue
 
-                        # 检查图片下载后可能移动到的子目录中的文件
-                        folder_name = os.path.splitext(filename)[0]
-                        subdir_file_path = os.path.join(target_dir, folder_name, filename)
-                        if os.path.exists(subdir_file_path):
-                            answer.skipped_count += 1
-                            Log.info(f"跳过已存在的文件（在子目录中）: {folder_name}/{filename}")
+                        # 只跳过明确标记为非文档的条目
+                        doc_type = doc.get('type', '')
+                        if doc_type and doc_type.upper() != 'DOC' and doc_type.lower() != 'document':
+                            Log.info(f"跳过非文档条目: {doc_title} (类型: {doc_type})")
                             continue
 
-                    # 调用进度回调，显示正在下载的文章
-                    if answer.progress_callback:
-                        answer.progress_callback(f"正在下载文章 ({i}/{len(filtered_docs)}): {doc_title}")
+                        # 根据层级结构构建目录路径
+                        target_dir = book_dir
+                        parent_uuid = doc.get('parent_uuid', '')
+                        if parent_uuid and parent_uuid in level_map:
+                            path_parts = Scheduler._build_doc_path(parent_uuid, level_map)
+                            if path_parts:
+                                target_dir = os.path.join(book_dir, *path_parts)
 
-                    Log.info(f"下载文档 ({i}/{len(filtered_docs)}): {doc_title}")
+                        # 生成文件名（md/html 二选一）
+                        base_name = format_filename(doc_title)
+                        if export_html and not export_md:
+                            filename = base_name + '.html'
+                        else:
+                            filename = base_name + '.md'
+                        if await _should_skip(target_dir, filename):
+                            continue
 
-                    # 直接传递完整的doc对象
-                    await Scheduler._download_doc(namespace, doc, book_dir, answer, level_map)
-                    
-                    # 记录下载成功
-                    answer.downloaded_count += 1
+                        # 调用进度回调，显示正在下载的文章
+                        if answer.progress_callback:
+                            answer.progress_callback(f"正在下载文章 ({i}/{len(filtered_docs)}): {doc_title}")
 
-                    # 添加延迟避免请求过快
-                    await asyncio.sleep(GLOBAL_CONFIG.duration / 1000)
+                        Log.info(f"下载文档 ({i}/{len(filtered_docs)}): {doc_title}")
 
-                except Exception as e:
-                    Log.error(f"下载文档失败: {str(e)}")
-                    continue
+                        # 直接传递完整的doc对象
+                        await Scheduler._download_doc(namespace, doc, book_dir, answer, level_map)
+
+                        # 记录下载成功
+                        answer.downloaded_count += 1
+
+                        # 添加延迟避免请求过快
+                        await asyncio.sleep(GLOBAL_CONFIG.duration / 1000)
+
+                    except Exception as e:
+                        Log.error(f"下载文档失败: {str(e)}")
+                        continue
 
             Log.success(f"知识库 {book.name} 下载完成")
 
@@ -276,6 +338,9 @@ class Scheduler:
             doc_uuid = doc.get('uuid', '')
             parent_uuid = doc.get('parent_uuid', '')
 
+            export_concurrency = max(1, int(getattr(answer, 'export_concurrency', 1) or 1))
+            playwright_concurrency = max(1, export_concurrency // 5)
+
             # 如果URL为空，尝试使用slug作为备选
             if not doc_url:
                 doc_url = doc_slug
@@ -290,25 +355,45 @@ class Scheduler:
                     ensure_dir_exists(target_dir)
                     Log.debug(f"文档层级路径: {path_parts}")
 
-            # 生成文件名
-            filename = format_filename(doc_title) + '.md'
-            file_path = os.path.join(target_dir, filename)
+                    export_md = getattr(answer, 'export_md', True)
+                    export_html = getattr(answer, 'export_html', False)
+                    if export_md == export_html:
+                        Log.error("导出格式设置错误：必须且只能选择一个（Markdown 或 HTML）")
+                        return
 
-            # 获取文档内容
-            markdown_content = await YuqueApi.export_markdown(namespace, doc_url, answer.line_break)
-            if not markdown_content:
-                Log.warn(f"无法获取文档内容: {doc_title}")
-                return
+                    base_name = format_filename(doc_title)
+                    f = File()
 
-            # 处理换行标识
-            if not answer.line_break:
-                markdown_content = markdown_content.replace('</br>', '')
-                markdown_content = markdown_content.replace('<br>', '')
-                markdown_content = markdown_content.replace('<br/>', '')
+                    if export_md:
+                        filename = base_name + '.md'
+                        file_path = os.path.join(target_dir, filename)
 
-            # 保存文档
-            f = File()
-            f.write(file_path, markdown_content)
+                        markdown_content = await YuqueApi.export_markdown(namespace, doc_url, answer.line_break)
+                        if not markdown_content:
+                            Log.warn(f"无法获取文档内容: {doc_title}")
+                            return
+
+                        if not answer.line_break:
+                            markdown_content = markdown_content.replace('</br>', '')
+                            markdown_content = markdown_content.replace('<br>', '')
+                            markdown_content = markdown_content.replace('<br/>', '')
+
+                        f.write(file_path, markdown_content)
+
+                    if export_html:
+                        filename = base_name + '.html'
+                        file_path = os.path.join(target_dir, filename)
+
+                        html_content = await YuqueApi.export_html(
+                            namespace,
+                            doc_url,
+                            title=doc_title,
+                            playwright_concurrency=playwright_concurrency,
+                        )
+                        if not html_content:
+                            Log.warn(f"HTML导出失败（内容为空）: {doc_title}")
+                            return
+                        f.write(file_path, html_content)
 
             # 计算相对路径用于日志显示
             rel_path = os.path.relpath(file_path, book_dir)

@@ -1,7 +1,11 @@
 import json
+import asyncio
+import os
 import re
 import sys
 import urllib.parse
+from html.parser import HTMLParser
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 
 from ..libs.constants import GLOBAL_CONFIG
@@ -12,6 +16,11 @@ from ..libs.tools import (
     get_cache_user_info, is_personal,
     save_user_info, save_books_info
 )
+
+try:
+    from ..libs.tools import get_local_cookies
+except Exception:
+    get_local_cookies = None
 
 # 导入调试日志模块
 try:
@@ -24,6 +33,375 @@ except ImportError:
 
 class YuqueApi:
     """语雀API类"""
+
+    _pw = None
+    _pw_browser = None
+    _pw_context = None
+    _pw_lock = None
+    _pw_semaphore = None
+    _pw_loop = None
+    _pw_semaphore_size = None
+
+    @staticmethod
+    def _ensure_playwright_bound_to_current_loop() -> None:
+        """确保 Playwright 复用状态绑定到当前 event loop。
+
+        AsyncWorker 每次导出都会创建一个新的 event loop（并在结束后 close）。
+        任何在旧 loop 创建的 asyncio.Lock/Semaphore 以及 Playwright 对象都不能在新 loop 继续使用，
+        否则会出现："is bound to a different event loop"。
+        """
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if YuqueApi._pw_loop is None:
+            YuqueApi._pw_loop = current_loop
+            return
+
+        if YuqueApi._pw_loop is not current_loop:
+            # 不尝试在新 loop 中关闭旧对象（旧 loop 可能已 close），直接丢弃引用并让后续重建。
+            YuqueApi._pw = None
+            YuqueApi._pw_browser = None
+            YuqueApi._pw_context = None
+            YuqueApi._pw_lock = None
+            YuqueApi._pw_semaphore = None
+            YuqueApi._pw_loop = current_loop
+            YuqueApi._pw_semaphore_size = None
+
+    @staticmethod
+    async def _reset_playwright_state() -> None:
+        """重置 Playwright 复用状态。
+
+        Playwright/Browser/Context 在异常情况下可能进入不可用状态（例如内部 connection 为 None），
+        这里做一次尽力清理并置空，方便后续重新初始化。
+        """
+        if YuqueApi._pw_lock is None:
+            YuqueApi._pw_lock = asyncio.Lock()
+        async with YuqueApi._pw_lock:
+            try:
+                if YuqueApi._pw_context is not None:
+                    try:
+                        await YuqueApi._pw_context.close()
+                    except Exception:
+                        pass
+            finally:
+                YuqueApi._pw_context = None
+
+            try:
+                if YuqueApi._pw_browser is not None:
+                    try:
+                        await YuqueApi._pw_browser.close()
+                    except Exception:
+                        pass
+            finally:
+                YuqueApi._pw_browser = None
+
+            try:
+                if YuqueApi._pw is not None:
+                    try:
+                        await YuqueApi._pw.stop()
+                    except Exception:
+                        pass
+            finally:
+                YuqueApi._pw = None
+
+    class _NeViewerBodyExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self._capturing = False
+            self._depth = 0
+            self._parts: List[str] = []
+
+        @property
+        def html(self) -> str:
+            return ''.join(self._parts).strip()
+
+        def handle_starttag(self, tag, attrs):
+            tag_l = tag.lower()
+            if not self._capturing and tag_l == 'div':
+                class_value = ''
+                for k, v in attrs:
+                    if k == 'class' and isinstance(v, str):
+                        class_value = v
+                        break
+                classes = set(class_value.split()) if class_value else set()
+                if 'ne-viewer-body' in classes:
+                    self._capturing = True
+                    self._depth = 1
+                    return
+
+            if self._capturing:
+                self._parts.append(self.get_starttag_text() or f"<{tag}>")
+                self._depth += 1
+
+        def handle_startendtag(self, tag, attrs):
+            if self._capturing:
+                text = self.get_starttag_text()
+                if text:
+                    self._parts.append(text)
+                else:
+                    attrs_text = ''.join([f' {k}="{v}"' for k, v in attrs if v is not None])
+                    self._parts.append(f"<{tag}{attrs_text} />")
+
+        def handle_endtag(self, tag):
+            if not self._capturing:
+                return
+
+            self._depth -= 1
+            if self._depth == 0 and tag.lower() == 'div':
+                self._capturing = False
+                return
+
+            self._parts.append(f"</{tag}>")
+
+        def handle_data(self, data):
+            if self._capturing and data:
+                self._parts.append(data)
+
+        def handle_entityref(self, name):
+            if self._capturing:
+                self._parts.append(f"&{name};")
+
+        def handle_charref(self, name):
+            if self._capturing:
+                self._parts.append(f"&#{name};")
+
+        def handle_comment(self, data):
+            if self._capturing:
+                self._parts.append(f"<!--{data}-->")
+
+    @staticmethod
+    def _normalize_doc_path(namespace: str, doc_identifier: str) -> Optional[str]:
+        parts = namespace.split('/')
+        if len(parts) != 2:
+            return None
+        user_login, repo_slug = parts
+
+        if not doc_identifier:
+            return None
+
+        if doc_identifier.startswith('http://') or doc_identifier.startswith('https://'):
+            try:
+                return urlparse(doc_identifier).path
+            except Exception:
+                return None
+
+        if doc_identifier.startswith('/'):
+            return doc_identifier
+        if doc_identifier.startswith(user_login + '/' + repo_slug):
+            return '/' + doc_identifier
+        if '/' in doc_identifier and not doc_identifier.startswith('/'):
+            return f"/{doc_identifier}"
+        return f"/{user_login}/{repo_slug}/{doc_identifier}"
+
+    @staticmethod
+    def _extract_ne_viewer_body_inner_html(page_html: str) -> Optional[str]:
+        if not page_html or 'ne-viewer-body' not in page_html:
+            return None
+        parser = YuqueApi._NeViewerBodyExtractor()
+        try:
+            parser.feed(page_html)
+            parser.close()
+        except Exception:
+            return None
+        return parser.html or None
+
+    @staticmethod
+    def _wrap_html_document(body_inner_html: str, title: str = "") -> str:
+        safe_title = (title or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        base_href = Request._get_match_host().rstrip('/') + '/'  # type: ignore[attr-defined]
+        # return (
+        #     "<!doctype html>\n"
+        #     "<html lang=\"zh-CN\">\n"
+        #     "<head>\n"
+        #     "  <meta charset=\"utf-8\">\n"
+        #     "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        #     f"  <base href=\"{base_href}\">\n"
+        #     f"  <title>{safe_title}</title>\n"
+        #     "</head>\n"
+        #     "<body>\n"
+        #     f"{body_inner_html}\n"
+        #     "</body>\n"
+        #     "</html>\n"
+        # )
+        return (
+            f"{body_inner_html}"
+        )
+
+    @staticmethod
+    def _cookie_string_to_playwright_cookies(cookie_string: str, domain: str) -> List[Dict[str, Any]]:
+        cookies: List[Dict[str, Any]] = []
+        if not cookie_string:
+            return cookies
+        for part in cookie_string.split(';'):
+            part = part.strip()
+            if not part or '=' not in part:
+                continue
+            name, value = part.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if not name:
+                continue
+            cookies.append({
+                'name': name,
+                'value': value,
+                'domain': domain,
+                'path': '/',
+            })
+        return cookies
+
+    @staticmethod
+    async def _fetch_ne_viewer_body_via_playwright(full_url: str, playwright_concurrency: int = 1) -> Optional[str]:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return None
+
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
+        # 关键：跨线程/跨 event loop 时必须重置复用状态
+        YuqueApi._ensure_playwright_bound_to_current_loop()
+
+        if YuqueApi._pw_lock is None:
+            YuqueApi._pw_lock = asyncio.Lock()
+
+        desired = max(1, int(playwright_concurrency or 1))
+        if YuqueApi._pw_semaphore is None or YuqueApi._pw_semaphore_size != desired:
+            # 避免并发打开太多页面（会非常慢且容易崩）
+            YuqueApi._pw_semaphore = asyncio.Semaphore(desired)
+            YuqueApi._pw_semaphore_size = desired
+
+        cookie_string = ""
+        if get_local_cookies is not None:
+            try:
+                cookie_string = get_local_cookies() or ""
+            except Exception:
+                cookie_string = ""
+
+        domain = urlparse(full_url).hostname or ".yuque.com"
+        pw_cookies = YuqueApi._cookie_string_to_playwright_cookies(cookie_string, domain=domain)
+
+        async def _ensure_context():
+            async with YuqueApi._pw_lock:
+                # 启动Playwright
+                if YuqueApi._pw is None:
+                    YuqueApi._pw = await async_playwright().start()
+
+                # 启动Browser（优先系统浏览器channel）
+                if YuqueApi._pw_browser is None:
+                    browser = None
+                    for channel in ["msedge", "chrome", "360chrome", "qqbrowser", "brave"]:
+                        try:
+                            browser = await YuqueApi._pw.chromium.launch(headless=True, channel=channel)
+                            break
+                        except Exception:
+                            continue
+                    if browser is None:
+                        try:
+                            browser = await YuqueApi._pw.chromium.launch(headless=True)
+                        except Exception as e:
+                            msg = str(e)
+                            if "playwright install" in msg or "Executable doesn't exist" in msg:
+                                Log.warn("Playwright浏览器未安装：请先运行 `playwright install`（或安装系统Edge/Chrome以便使用channel启动）", detailed=True)
+                            else:
+                                Log.warn(f"Playwright启动失败: {msg}", detailed=True)
+                            return None
+                    YuqueApi._pw_browser = browser
+
+                # 创建/复用Context
+                if YuqueApi._pw_context is None:
+                    try:
+                        YuqueApi._pw_context = await YuqueApi._pw_browser.new_context()
+                        if pw_cookies:
+                            try:
+                                await YuqueApi._pw_context.add_cookies(pw_cookies)
+                            except Exception:
+                                pass
+                    except Exception:
+                        YuqueApi._pw_context = None
+                        return None
+
+                return YuqueApi._pw_context
+
+        async def _run_once() -> Optional[str]:
+            context = await _ensure_context()
+            if context is None:
+                return None
+
+            page = None
+            try:
+                page = await context.new_page()
+                await page.goto(full_url, wait_until='networkidle', timeout=45000)
+                await page.wait_for_selector('div.ne-viewer-body', timeout=20000)
+                inner = await page.inner_html('div.ne-viewer-body')
+                return inner.strip() if inner else None
+            finally:
+                if page is not None:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+        async with YuqueApi._pw_semaphore:
+            try:
+                return await _run_once()
+            except Exception as e:
+                # 典型失效：BrowserContext.new_page -> NoneType.send
+                msg = str(e)
+                if "NoneType" in msg and "send" in msg:
+                    Log.warn("Playwright上下文疑似失效，正在重置并重试一次...", detailed=True)
+                    await YuqueApi._reset_playwright_state()
+                    try:
+                        return await _run_once()
+                    except Exception as e2:
+                        Log.warn(f"Playwright重试仍失败: {str(e2)}", detailed=True)
+                        return None
+                raise
+
+    @staticmethod
+    async def export_html(namespace: str, doc_identifier: str, title: str = "", playwright_concurrency: int = 1) -> Optional[str]:
+        """导出文档为HTML（提取 div.ne-viewer-body 内部内容）
+
+        策略：优先用 Request.get_text 抓取页面HTML并解析；失败再用 Playwright 渲染提取。
+        """
+        try:
+            doc_path = YuqueApi._normalize_doc_path(namespace, doc_identifier)
+            if not doc_path:
+                Log.error(f"无效的知识库命名空间或文档标识符: {namespace}/{doc_identifier}")
+                return None
+
+            if _has_debug_logger:
+                DebugLogger.log_info(f"导出HTML文档: {namespace}/{doc_identifier}")
+
+            # 1) 直连抓取
+            try:
+                page_html = await Request.get_text(doc_path, is_html=True)
+                inner = YuqueApi._extract_ne_viewer_body_inner_html(page_html)
+                if inner:
+                    return YuqueApi._wrap_html_document(inner, title=title)
+            except Exception as e:
+                Log.warn(f"直连获取HTML失败，将尝试Playwright: {str(e)}", detailed=True)
+
+            # 2) Playwright 渲染兜底
+            try:
+                full_url = urllib.parse.urljoin(Request._get_match_host(), doc_path)
+                inner = await YuqueApi._fetch_ne_viewer_body_via_playwright(
+                    full_url,
+                    playwright_concurrency=playwright_concurrency,
+                )
+                if inner:
+                    return YuqueApi._wrap_html_document(inner, title=title)
+            except Exception as e:
+                Log.warn(f"Playwright获取HTML失败: {str(e)}", detailed=True)
+
+            return None
+
+        except Exception as e:
+            Log.error(f"导出HTML失败: {str(e)}")
+            if _has_debug_logger:
+                DebugLogger.log_error(f"导出HTML异常: {str(e)}")
+            return None
 
     @staticmethod
     async def login(username: str, password: str) -> bool:

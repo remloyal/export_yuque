@@ -89,6 +89,16 @@ class ExportManagerMixin:
             QMessageBox.warning(self, "错误", "请先选择要导出的知识库")
             return
 
+        # 导出格式：md/html 二选一
+        export_md = True
+        export_html = False
+        if hasattr(self, 'export_md_checkbox') and hasattr(self, 'export_html_checkbox'):
+            export_md = self.export_md_checkbox.isChecked()
+            export_html = self.export_html_checkbox.isChecked()
+            if export_md == export_html:
+                QMessageBox.warning(self, "错误", "导出格式只能选择一个：Markdown 或 HTML")
+                return
+
         try:
             # 检查是否有选择的文章
             has_selected_articles = hasattr(self, '_current_answer') and hasattr(self._current_answer, 'selected_docs') and self._current_answer.selected_docs
@@ -98,6 +108,9 @@ class ExportManagerMixin:
                 toc_range=[],  # 稍后根据选择设置
                 skip=self.skip_local_checkbox.isChecked(),
                 line_break=self.keep_linebreak_checkbox.isChecked(),
+                export_md=export_md,
+                export_html=export_html,
+                export_concurrency=self.download_threads if export_html else 1,
                 download_range="selected" if has_selected_articles else "all"  # 根据是否选择了具体文章来决定
             )
 
@@ -165,6 +178,10 @@ class ExportManagerMixin:
             self.skip_local_checkbox.setEnabled(False)
             self.keep_linebreak_checkbox.setEnabled(False)
             self.clean_button.setEnabled(False)
+            if hasattr(self, 'export_html_checkbox'):
+                self.export_html_checkbox.setEnabled(False)
+            if hasattr(self, 'export_md_checkbox'):
+                self.export_md_checkbox.setEnabled(False)
             self.article_list.setEnabled(False)
             self.article_search_input.setEnabled(False)
             self.select_all_articles_btn.setEnabled(False)
@@ -209,6 +226,10 @@ class ExportManagerMixin:
         self.skip_local_checkbox.setEnabled(True)
         self.keep_linebreak_checkbox.setEnabled(True)
         self.clean_button.setEnabled(True)
+        if hasattr(self, 'export_html_checkbox'):
+            self.export_html_checkbox.setEnabled(True)
+        if hasattr(self, 'export_md_checkbox'):
+            self.export_md_checkbox.setEnabled(True)
 
         # 启用文章面板控件
         self.article_list.setEnabled(True)
@@ -369,6 +390,10 @@ class ExportManagerMixin:
         self.skip_local_checkbox.setEnabled(True)
         self.keep_linebreak_checkbox.setEnabled(True)
         self.clean_button.setEnabled(True)
+        if hasattr(self, 'export_html_checkbox'):
+            self.export_html_checkbox.setEnabled(True)
+        if hasattr(self, 'export_md_checkbox'):
+            self.export_md_checkbox.setEnabled(True)
         self.article_list.setEnabled(True)
         self.article_search_input.setEnabled(True)
         self.select_all_articles_btn.setEnabled(True)

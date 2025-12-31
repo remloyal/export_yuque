@@ -827,6 +827,26 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         self.download_images_checkbox.setStyleSheet("font-size: 12px; padding: 3px 0; margin: 0 0 2px 0;")  
         options_layout.addWidget(self.download_images_checkbox)
 
+        self.export_md_checkbox = QCheckBox("导出为Markdown")
+        self.export_md_checkbox.setToolTip("导出为Markdown文件（.md）")
+        self.export_md_checkbox.setChecked(True)
+        self.export_md_checkbox.setStyleSheet("font-size: 12px; padding: 3px 0; margin: 0 0 2px 0;")
+        options_layout.addWidget(self.export_md_checkbox)
+
+        self.export_html_checkbox = QCheckBox("导出为HTML")
+        self.export_html_checkbox.setToolTip("导出为HTML文件（提取 div.ne-viewer-body；优先直连抓取，失败再用浏览器渲染）")
+        self.export_html_checkbox.setChecked(False)
+        self.export_html_checkbox.setStyleSheet("font-size: 12px; padding: 3px 0; margin: 0 0 2px 0;")
+        options_layout.addWidget(self.export_html_checkbox)
+
+        # 二选一：Markdown / HTML
+        self.export_md_checkbox.stateChanged.connect(
+            lambda state: self.export_html_checkbox.setChecked(False) if state == Qt.Checked else None
+        )
+        self.export_html_checkbox.stateChanged.connect(
+            lambda state: self.export_md_checkbox.setChecked(False) if state == Qt.Checked else None
+        )
+
         # 输出目录设置 - 改进的垂直布局
         output_label = QLabel("输出目录:")
         output_label.setStyleSheet("font-weight: bold; font-size: 12px; margin: 0 0 2px 0;")  
@@ -956,7 +976,7 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         settings_page = self.create_settings_page()
 
         # 关于页面
-        about_page = self.create_about_page()
+        # about_page = self.create_about_page()
 
         # 添加标签页
         tabs.addTab(login_page, "登录")
@@ -967,7 +987,7 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         log_page = self.create_log_page()
         tabs.addTab(log_page, "运行日志")
         
-        tabs.addTab(about_page, "关于")
+        # tabs.addTab(about_page, "关于")
 
         # 连接标签页切换信号
         tabs.currentChanged.connect(self.on_tab_changed)
@@ -1016,7 +1036,7 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         # 默认隐藏进度条，仅在知识库选择页显示
         self.progress_widget.setVisible(False)
 
-        copyright_label = QLabel("Copyright © 2025 By Be1k0 | https://github.com/Be1k0")
-        copyright_label.setAlignment(Qt.AlignCenter)
-        copyright_label.setStyleSheet("color: #6c757d; padding: 5px;")
-        main_layout.addWidget(copyright_label)
+        # copyright_label = QLabel("Copyright © 2025 By Be1k0 | https://github.com/Be1k0")
+        # copyright_label.setAlignment(Qt.AlignCenter)
+        # copyright_label.setStyleSheet("color: #6c757d; padding: 5px;")
+        # main_layout.addWidget(copyright_label)
