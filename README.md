@@ -70,6 +70,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+4. 打包
+
+```bash
+pip install pyinstaller
+
+pyinstaller -F -w  main.py
+```
+
 ## 使用说明
 
 ### 基本使用流程
@@ -131,7 +139,7 @@ python main.py
 
 本项目采用 GPL 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情
 
-## 作者
+## 原作者
 
 **Be1k0** - [GitHub](https://github.com/Be1k0)
 

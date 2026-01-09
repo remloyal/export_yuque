@@ -110,6 +110,11 @@ class ExportManagerMixin:
                 line_break=self.keep_linebreak_checkbox.isChecked(),
                 export_md=export_md,
                 export_html=export_html,
+                html_use_absolute_path=(
+                    bool(getattr(self, 'html_use_absolute_path_checkbox').isChecked())
+                    if export_html and hasattr(self, 'html_use_absolute_path_checkbox')
+                    else False
+                ),
                 export_concurrency=self.download_threads if export_html else 1,
                 download_range="selected" if has_selected_articles else "all"  # 根据是否选择了具体文章来决定
             )
@@ -182,6 +187,8 @@ class ExportManagerMixin:
                 self.export_html_checkbox.setEnabled(False)
             if hasattr(self, 'export_md_checkbox'):
                 self.export_md_checkbox.setEnabled(False)
+            if hasattr(self, 'html_use_absolute_path_checkbox'):
+                self.html_use_absolute_path_checkbox.setEnabled(False)
             self.article_list.setEnabled(False)
             self.article_search_input.setEnabled(False)
             self.select_all_articles_btn.setEnabled(False)
@@ -230,6 +237,8 @@ class ExportManagerMixin:
             self.export_html_checkbox.setEnabled(True)
         if hasattr(self, 'export_md_checkbox'):
             self.export_md_checkbox.setEnabled(True)
+        if hasattr(self, 'html_use_absolute_path_checkbox'):
+            self.html_use_absolute_path_checkbox.setEnabled(True)
 
         # 启用文章面板控件
         self.article_list.setEnabled(True)
@@ -394,6 +403,8 @@ class ExportManagerMixin:
             self.export_html_checkbox.setEnabled(True)
         if hasattr(self, 'export_md_checkbox'):
             self.export_md_checkbox.setEnabled(True)
+        if hasattr(self, 'html_use_absolute_path_checkbox'):
+            self.html_use_absolute_path_checkbox.setEnabled(True)
         self.article_list.setEnabled(True)
         self.article_search_input.setEnabled(True)
         self.select_all_articles_btn.setEnabled(True)

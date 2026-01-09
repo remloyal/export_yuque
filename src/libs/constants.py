@@ -76,6 +76,7 @@ class MutualAnswer:
     line_break: bool
     export_md: bool = True
     export_html: bool = False
+    html_use_absolute_path: bool = False
     export_concurrency: int = 1
     download_range: str = "all"  
     selected_docs: Dict[str, List[str]] = field(default_factory=dict) 

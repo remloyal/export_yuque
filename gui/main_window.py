@@ -839,12 +839,24 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         self.export_html_checkbox.setStyleSheet("font-size: 12px; padding: 3px 0; margin: 0 0 2px 0;")
         options_layout.addWidget(self.export_html_checkbox)
 
+        self.html_use_absolute_path_checkbox = QCheckBox("HTML图片使用绝对路径（images/xxx）")
+        self.html_use_absolute_path_checkbox.setToolTip("开启后，HTML 内图片链接统一写为 images/xxx；关闭则按文档目录生成相对路径（可能包含 ../..）")
+        self.html_use_absolute_path_checkbox.setChecked(False)
+        self.html_use_absolute_path_checkbox.setStyleSheet("font-size: 12px; padding: 3px 0; margin: 0 0 2px 0;")
+        self.html_use_absolute_path_checkbox.setVisible(False)
+        options_layout.addWidget(self.html_use_absolute_path_checkbox)
+
         # 二选一：Markdown / HTML
         self.export_md_checkbox.stateChanged.connect(
             lambda state: self.export_html_checkbox.setChecked(False) if state == Qt.Checked else None
         )
         self.export_html_checkbox.stateChanged.connect(
             lambda state: self.export_md_checkbox.setChecked(False) if state == Qt.Checked else None
+        )
+
+        # 仅在选择 HTML 导出时显示该选项
+        self.export_html_checkbox.stateChanged.connect(
+            lambda state: self.html_use_absolute_path_checkbox.setVisible(state == Qt.Checked)
         )
 
         # 输出目录设置 - 改进的垂直布局

@@ -8,6 +8,8 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 
+import aiohttp
+
 from ..libs.constants import GLOBAL_CONFIG
 from ..libs.encrypt import encrypt_password
 from ..libs.log import Log
@@ -360,7 +362,145 @@ class YuqueApi:
                 raise
 
     @staticmethod
-    async def export_html(namespace: str, doc_identifier: str, title: str = "", playwright_concurrency: int = 1) -> Optional[str]:
+    async def _download_images_to_dir(
+        html: str,
+        doc_path: str,
+        asset_dir: Optional[str],
+        asset_url_prefix: str = "",
+        concurrency: int = 4,
+    ) -> str:
+        """下载HTML中的图片到指定目录，并替换src为统一目录/文件名。
+
+        Args:
+            html: 待处理的HTML片段/文档
+            doc_path: 文档路径，用于解析相对图片链接
+            asset_dir: 图片保存的本地目录（绝对路径）。为空则不处理
+            asset_url_prefix: 写回HTML时使用的前缀（如 "images/"）。
+            concurrency: 并发下载图片数量限制
+        """
+        if not html or "<img" not in html.lower() or not asset_dir:
+            return html
+
+        img_pattern = re.compile(r"<img[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+        src_list: List[str] = []
+        for match in img_pattern.finditer(html):
+            src = match.group(1).strip()
+            if not src or src.lower().startswith("data:"):
+                continue
+            if src not in src_list:
+                src_list.append(src)
+
+        if not src_list:
+            return html
+
+        os.makedirs(asset_dir, exist_ok=True)
+
+        cookies = ""
+        if get_local_cookies is not None:
+            try:
+                cookies = get_local_cookies() or ""
+            except Exception:
+                cookies = ""
+
+        headers = Request._get_request_headers()
+        headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        headers.pop("x-requested-with", None)
+        if cookies:
+            headers["cookie"] = cookies
+
+        base_url = urllib.parse.urljoin(Request._get_match_host(), doc_path)
+
+        semaphore = asyncio.Semaphore(max(1, int(concurrency or 1)))
+        replacements: Dict[str, str] = {}
+
+        async with aiohttp.ClientSession() as session:
+            async def fetch_and_save(src: str, idx: int) -> None:
+                # 解析完整URL
+                resolved = src
+                if src.startswith("//"):
+                    resolved = "https:" + src
+                elif not urlparse(src).scheme:
+                    resolved = urllib.parse.urljoin(base_url, src)
+
+                # 如果同一src已处理过，复用结果
+                if src in replacements:
+                    return
+
+                async with semaphore:
+                    try:
+                        async with session.get(resolved, headers=headers, timeout=30) as resp:
+                            if resp.status != 200:
+                                Log.warn(f"图片下载失败({resp.status}): {resolved}", detailed=True)
+                                return
+                            data = await resp.read()
+
+                            # 生成文件名
+                            parsed = urlparse(resolved)
+                            filename = os.path.basename(parsed.path)
+                            if not filename:
+                                filename = f"image-{idx}"
+                            name, ext = os.path.splitext(filename)
+                            if not ext:
+                                content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                                guessed_ext = ""
+                                if content_type == "image/png":
+                                    guessed_ext = ".png"
+                                elif content_type in ("image/jpeg", "image/jpg"):
+                                    guessed_ext = ".jpg"
+                                elif content_type == "image/gif":
+                                    guessed_ext = ".gif"
+                                elif content_type == "image/webp":
+                                    guessed_ext = ".webp"
+                                elif content_type == "image/svg+xml":
+                                    guessed_ext = ".svg"
+                                ext = guessed_ext or ".bin"
+                            final_name = f"{name}{ext}"
+
+                            # 防止重名覆盖
+                            counter = 1
+                            target_path = os.path.join(asset_dir, final_name)
+                            while os.path.exists(target_path):
+                                final_name = f"{name}-{counter}{ext}"
+                                target_path = os.path.join(asset_dir, final_name)
+                                counter += 1
+
+                            with open(target_path, "wb") as f:
+                                f.write(data)
+
+                            prefix = asset_url_prefix or ""
+                            if prefix and not prefix.endswith("/"):
+                                prefix = prefix + "/"
+                            replacements[src] = (prefix + final_name).replace("\\", "/")
+                    except Exception as e:
+                        Log.warn(f"图片下载异常: {resolved}: {str(e)}", detailed=True)
+
+            await asyncio.gather(*(fetch_and_save(src, idx) for idx, src in enumerate(src_list)))
+
+        if not replacements:
+            return html
+
+        replace_pattern = re.compile(r"(<img[^>]*\bsrc\s*=\s*)(['\"])([^'\"]+)(\2)", re.IGNORECASE)
+
+        def _repl(match: re.Match) -> str:
+            prefix, quote, src, _ = match.groups()
+            new_src = replacements.get(src)
+            if new_src:
+                return f"{prefix}{quote}{new_src}{quote}"
+            return match.group(0)
+
+        return replace_pattern.sub(_repl, html)
+
+    @staticmethod
+    async def export_html(
+        namespace: str,
+        doc_identifier: str,
+        title: str = "",
+        playwright_concurrency: int = 1,
+        asset_dir: Optional[str] = None,
+        asset_url_prefix: str = "",
+        asset_concurrency: int = 4,
+        use_absolute_path: bool = False,
+    ) -> Optional[str]:
         """导出文档为HTML（提取 div.ne-viewer-body 内部内容）
 
         策略：优先用 Request.get_text 抓取页面HTML并解析；失败再用 Playwright 渲染提取。
@@ -371,6 +511,11 @@ class YuqueApi:
                 Log.error(f"无效的知识库命名空间或文档标识符: {namespace}/{doc_identifier}")
                 return None
 
+            effective_asset_url_prefix = asset_url_prefix
+            if use_absolute_path and asset_dir:
+                # “绝对路径”语义：始终写成 images/xxx（其中 images 为 asset_dir 的目录名）
+                effective_asset_url_prefix = os.path.basename(os.path.normpath(asset_dir))
+
             if _has_debug_logger:
                 DebugLogger.log_info(f"导出HTML文档: {namespace}/{doc_identifier}")
 
@@ -379,7 +524,14 @@ class YuqueApi:
                 page_html = await Request.get_text(doc_path, is_html=True)
                 inner = YuqueApi._extract_ne_viewer_body_inner_html(page_html)
                 if inner:
-                    return YuqueApi._wrap_html_document(inner, title=title)
+                    html = YuqueApi._wrap_html_document(inner, title=title)
+                    return await YuqueApi._download_images_to_dir(
+                        html,
+                        doc_path,
+                        asset_dir,
+                        effective_asset_url_prefix,
+                        concurrency=asset_concurrency,
+                    )
             except Exception as e:
                 Log.warn(f"直连获取HTML失败，将尝试Playwright: {str(e)}", detailed=True)
 
@@ -391,7 +543,14 @@ class YuqueApi:
                     playwright_concurrency=playwright_concurrency,
                 )
                 if inner:
-                    return YuqueApi._wrap_html_document(inner, title=title)
+                    html = YuqueApi._wrap_html_document(inner, title=title)
+                    return await YuqueApi._download_images_to_dir(
+                        html,
+                        doc_path,
+                        asset_dir,
+                        effective_asset_url_prefix,
+                        concurrency=asset_concurrency,
+                    )
             except Exception as e:
                 Log.warn(f"Playwright获取HTML失败: {str(e)}", detailed=True)
 

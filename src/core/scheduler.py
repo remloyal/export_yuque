@@ -384,11 +384,18 @@ class Scheduler:
                         filename = base_name + '.html'
                         file_path = os.path.join(target_dir, filename)
 
+                        # 统一把图片放在知识库根目录的 images/ 下，子目录文档用相对路径引用
+                        asset_dir = os.path.join(book_dir, 'images')
+                        asset_url_prefix = os.path.relpath(asset_dir, target_dir)
+                        use_absolute_path = bool(getattr(answer, 'html_use_absolute_path', False))
                         html_content = await YuqueApi.export_html(
                             namespace,
                             doc_url,
                             title=doc_title,
                             playwright_concurrency=playwright_concurrency,
+                            asset_dir=asset_dir,
+                            asset_url_prefix=asset_url_prefix,
+                            use_absolute_path=use_absolute_path,
                         )
                         if not html_content:
                             Log.warn(f"HTML导出失败（内容为空）: {doc_title}")
