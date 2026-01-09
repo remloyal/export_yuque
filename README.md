@@ -73,9 +73,7 @@ python main.py
 4. 打包
 
 ```bash
-pip install pyinstaller
-
-pyinstaller -F -w  main.py
+pyinstaller main.spec
 ```
 
 ## 使用说明
