@@ -24,6 +24,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute build id (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ref = $env:GITHUB_REF_NAME
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'unknown-ref' }
+          $ref = $ref -replace '[\\/]', '-'
+          $sha = $env:GITHUB_SHA
+          if ([string]::IsNullOrWhiteSpace($sha)) { $sha = 'unknownsha' }
+          $short = if ($sha.Length -ge 7) { $sha.Substring(0,7) } else { $sha }
+          "BUILD_ID=$ref-$short" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Compute build id (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME:-unknown-ref}"
+          ref="${ref//\//-}"
+          sha="${GITHUB_SHA:-unknownsha}"
+          short="${sha:0:7}"
+          echo "BUILD_ID=${ref}-${short}" >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -45,7 +69,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Compress-Archive -Path "dist\\main\\*" -DestinationPath "out\\yuque_document_download-windows.zip" -Force
+          if (-not (Test-Path -Path "dist")) { throw "dist directory not found; PyInstaller build likely failed." }
+
+          $artifactPath = "dist\\yuque_document.exe"
+          if (-not (Test-Path -Path $artifactPath)) {
+            $artifactPath = "dist\\yuque_document"
+          }
+          if (-not (Test-Path -Path $artifactPath)) {
+            $artifactPath = "dist\\*"
+          }
+
+          Compress-Archive -Path $artifactPath -DestinationPath "out\\yuque_document_download-windows-$env:BUILD_ID.zip" -Force
 
       - name: Package artifact (macOS)
         if: runner.os == 'macOS'
@@ -53,11 +87,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          ditto -c -k --sequesterRsrc --keepParent "dist/main" "out/yuque_document_download-macos.zip"
+          test -d dist
+
+          artifact_path="dist/yuque_document"
+          if [ ! -e "$artifact_path" ]; then
+            artifact_path="dist"
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent "$artifact_path" "out/yuque_document_download-macos-$BUILD_ID.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: yuque_document_download-${{ runner.os }}
+          name: yuque_document_download-${{ runner.os }}-${{ env.BUILD_ID }}
           path: out/*.zip
           if-no-files-found: error
