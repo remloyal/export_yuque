@@ -4,7 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [ "main", "master" ]
-    tags: [ "v*" ]
+    tags:
+      - 'v0.*'
+      - 'draft-*'
   pull_request:
 
 permissions:
@@ -119,7 +121,7 @@ jobs:
         run: ls -la
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v1
         with:
           files: |
             *.zip
