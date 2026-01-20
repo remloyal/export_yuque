@@ -48,14 +48,18 @@ class SettingsManagerMixin:
         self.rename_button_group = QButtonGroup()
         self.rename_radio1 = QRadioButton("递增命名")
         self.rename_radio2 = QRadioButton("保持图片原名")
+        self.rename_radio3 = QRadioButton("哈希命名")
 
         # 添加到按钮组
         self.rename_button_group.addButton(self.rename_radio1, 0)
         self.rename_button_group.addButton(self.rename_radio2, 1)
+        self.rename_button_group.addButton(self.rename_radio3, 2)
 
         # 设置默认选中状态
         if self.image_rename_mode == "asc":
             self.rename_radio1.setChecked(True)
+        elif self.image_rename_mode == "hash":
+            self.rename_radio3.setChecked(True)
         else:
             self.rename_radio2.setChecked(True)
 
@@ -65,6 +69,7 @@ class SettingsManagerMixin:
         rename_layout.addWidget(rename_label)
         rename_layout.addWidget(self.rename_radio1)
         rename_layout.addWidget(self.rename_radio2)
+        rename_layout.addWidget(self.rename_radio3)
         rename_layout.addStretch()
         image_layout.addLayout(rename_layout)
 
@@ -75,7 +80,7 @@ class SettingsManagerMixin:
         self.file_prefix_input = QLineEdit(self.image_file_prefix)
         self.file_prefix_input.setMaximumWidth(150)
         self.file_prefix_input.textChanged.connect(self.auto_save_settings)
-        file_prefix_help = QLabel("(递增模式下的文件名前缀)")
+        file_prefix_help = QLabel("(重命名模式下的文件名前缀)")
         file_prefix_help.setStyleSheet("color: #6c757d; font-size: 12px;")
         file_prefix_layout.addWidget(file_prefix_label)
         file_prefix_layout.addWidget(self.file_prefix_input)
@@ -195,9 +200,11 @@ class SettingsManagerMixin:
             # 保存其他设置
             # 获取选中的单选按钮文本并转换为底层代码期望的值
             if self.rename_radio1.isChecked():
-                self.image_rename_mode = "asc"  
+                self.image_rename_mode = "asc"
+            elif self.rename_radio3.isChecked():
+                self.image_rename_mode = "hash"
             else:
-                self.image_rename_mode = "raw"  
+                self.image_rename_mode = "raw"
             self.image_file_prefix = self.file_prefix_input.text()
             self.yuque_cdn_domain = self.cdn_input.text()
 
@@ -305,6 +312,8 @@ class SettingsManagerMixin:
                     self.image_rename_mode = settings['image_rename_mode']
                     if self.image_rename_mode == 'asc':
                         self.rename_radio1.setChecked(True)
+                    elif self.image_rename_mode == 'hash':
+                        self.rename_radio3.setChecked(True)
                     else:
                         self.rename_radio2.setChecked(True)
                 

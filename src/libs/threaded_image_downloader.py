@@ -1,6 +1,7 @@
 import os
 import re
 import threading
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -18,13 +19,10 @@ class ThreadedImageDownloader:
         self.total_count = 0
         self.lock = threading.Lock()
 
-    def download_image(self, image_url, image_dir, image_name_mode, idx, suffix, image_file_prefix):
+    def download_image(self, image_url, image_dir, image_name):
         """下载单个图片"""
         try:
             r = requests.get(image_url, stream=True, timeout=30)
-            image_name = image_url.split('/')[-1]
-            if image_name_mode == 'asc':
-                image_name = image_file_prefix + str(idx) + suffix
 
             if r.status_code == 200:
                 file_path = os.path.join(image_dir, image_name)
@@ -54,34 +52,40 @@ class ThreadedImageDownloader:
         output_content = []
         image_tasks = []
         idx = 0
+        base_name = os.path.splitext(os.path.basename(origin_md_path))[0]
+        # 将文档名清洗为安全前缀，若清洗后为空则退回短哈希
+        safe_slug = re.sub(r'[^A-Za-z0-9_-]+', '-', base_name).strip('-')
+        safe_slug = safe_slug[:32] if safe_slug else hashlib.md5(base_name.encode('utf-8')).hexdigest()[:8]
+        doc_prefix = f"{safe_slug}-" if safe_slug else ''
 
         # 第一遍：解析文件，收集图片URL
         with open(origin_md_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f.readlines():
                 line = re.sub(r'png#(.*)+', 'png)', line)
                 # 改进的正则表达式，能更好地匹配图片URL，包括带有HTML标签的情况
-                image_urls = re.findall(r'https?://[^\s<>"\)\]]+\.(?:png|jpeg|jpg)', line, re.IGNORECASE)
+                image_urls = re.findall(r'https?://[^\s<>")\]]+\.(?:png|jpeg|jpg)', line, re.IGNORECASE)
 
                 if image_urls:
                     image_url = image_urls[0]  # 取第一个匹配的URL
                     # 清理URL中可能的多余字符
                     image_url = image_url.rstrip('.,;:!?')
-                    if '.png' in image_url:
-                        suffix = '.png'
-                    elif '.jpeg' in image_url:
-                        suffix = '.jpeg'
+                    suffix_match = re.search(r'\.(png|jpeg|jpg)', image_url, re.IGNORECASE)
+                    suffix = f".{suffix_match.group(1).lower()}" if suffix_match else ''
+
+                    # 计算图片名称
+                    if image_rename_mode == 'asc':
+                        image_name = f"{image_file_prefix}{doc_prefix}{idx}{suffix}"
+                    elif image_rename_mode == 'hash':
+                        hash_val = hashlib.md5(image_url.encode('utf-8')).hexdigest()
+                        image_name = f"{image_file_prefix}{hash_val}{suffix}"
+                    else:
+                        image_name = image_url.split('/')[-1]
 
                     # 添加到下载任务列表
-                    image_tasks.append((image_url, image_dir, image_rename_mode, idx, suffix, image_file_prefix))
+                    image_tasks.append((image_url, image_dir, image_name))
 
                     # 更新文件内容中的图片URL
-                    to_replace = '/'.join(image_url.split('/')[:-1])
-                    new_image_url = image_url.replace(to_replace, 'placeholder')
-                    if image_rename_mode == 'asc':
-                        new_image_url = image_url_prefix + image_file_prefix + str(idx) + suffix
-                    else:
-                        new_image_url = new_image_url.replace('placeholder/', image_url_prefix)
-
+                    new_image_url = f"{image_url_prefix}{image_name}"
                     line = line.replace(image_url, new_image_url)
                     idx += 1
 
@@ -131,14 +135,14 @@ class ThreadedImageDownloader:
             os.makedirs(image_dir)
             Log.info(f'图片存储目录 {image_dir} 创建成功')
 
-    def process_single_file(self, md_file_path, image_url_prefix='', image_rename_mode='asc',
+    def process_single_file(self, md_file_path, image_url_prefix='', image_rename_mode='hash',
                             image_file_prefix='image-', yuque_cdn_domain='cdn.nlark.com'):
         """处理单个Markdown文件，下载图片到本地
         
         Args:
             md_file_path: Markdown文件路径
             image_url_prefix: 文档图片前缀，默认为空
-            image_rename_mode: 图片重命名模式，默认为'asc'
+            image_rename_mode: 图片重命名模式，默认为'hash'
             image_file_prefix: 图片文件前缀，默认为'image-'
             yuque_cdn_domain: 语雀CDN域名，默认为'cdn.nlark.com'
         
@@ -170,21 +174,10 @@ class ThreadedImageDownloader:
             Log.info(f'文档 {filename} 不包含图片，跳过处理')
             return 0
 
-        # 检查文件是否已经在同名目录中
-        folder_name = os.path.splitext(filename)[0]
-        parent_folder_name = os.path.basename(parent_dir)
-
-        # 如果文件已经在同名目录中，直接使用当前目录作为图片存储目录
-        if parent_folder_name == folder_name:
-            image_dir = parent_dir
-            output_md_path = md_file_path  # 直接覆盖原文件
-            Log.info(f'文件已在同名目录中，直接在当前目录处理: {parent_dir}')
-        else:
-            # 否则创建新的图片存储文件夹
-            image_dir = os.path.join(parent_dir, folder_name)
-            self.mkdir(image_dir)
-            output_md_path = os.path.join(image_dir, filename)
-            Log.info(f'创建新的图片存储目录: {image_dir}')
+        # 不再调整目录结构，直接在当前目录下载图片并覆盖原Markdown
+        image_dir = parent_dir
+        output_md_path = md_file_path
+        Log.info(f'在当前目录处理文件，不创建新文件夹: {parent_dir}')
 
         cnt = self.deal_yuque(origin_md_path=md_file_path,
                               output_md_path=output_md_path,

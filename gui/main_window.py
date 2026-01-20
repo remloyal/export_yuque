@@ -64,7 +64,7 @@ class YuqueGUI(QMainWindow, LoginManagerMixin, BookManagerMixin, ArticleManagerM
         # 初始化设置变量
         self.download_threads = 5  # 默认下载线程数
         self.doc_image_prefix = ''  # 文档图片前缀
-        self.image_rename_mode = 'asc'  # 图片重命名模式
+        self.image_rename_mode = 'hash'  # 图片重命名模式
         self.image_file_prefix = 'image-'  # 图片文件前缀
         self.yuque_cdn_domain = 'cdn.nlark.com'  # 语雀CDN域名
         self.enable_debug = False  # 调试模式
