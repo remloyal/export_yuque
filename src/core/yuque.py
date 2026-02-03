@@ -428,7 +428,7 @@ class YuqueApi:
 
                 async with semaphore:
                     try:
-                        async with session.get(resolved, headers=headers, timeout=30) as resp:
+                        async with session.get(resolved, headers=headers, timeout=30, ssl=False) as resp:
                             if resp.status != 200:
                                 Log.warn(f"图片下载失败({resp.status}): {resolved}", detailed=True)
                                 return

@@ -62,7 +62,7 @@ class Request:
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(target_url, headers=headers) as response:
+                async with session.get(target_url, headers=headers, ssl=False) as response:
                     response_text = await response.text()
 
                     # 记录响应信息到调试日志
@@ -127,7 +127,7 @@ class Request:
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(target_url, headers=headers) as response:
+                async with session.get(target_url, headers=headers, ssl=False) as response:
                     content = await response.text(errors='replace')
 
                     # 记录响应信息到调试日志
@@ -170,7 +170,7 @@ class Request:
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(target_url, headers=headers, json=data) as response:
+                async with session.post(target_url, headers=headers, json=data, ssl=False) as response:
                     response_text = await response.text()
 
                     # 尝试解析响应为JSON
@@ -214,7 +214,7 @@ class Request:
             headers = Request._get_request_headers()
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
+                async with session.get(url, headers=headers, ssl=False) as response:
                     if response.status != 200:
                         Log.error(f"文件下载失败：{url}")
                         return False
